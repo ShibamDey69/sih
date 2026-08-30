@@ -1,0 +1,145 @@
+
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  INVESTIGATING_OFFICER
+  STATION_IN_CHARGE
+  PROSECUTOR
+  COURT_CLERK_JUDGE
+}
+
+enum DocumentStatus {
+  VERIFIED
+  PENDING_VERIFICATION
+  TAMPERED_FLAGGED
+  FROZEN
+}
+
+enum CustodyStatus {
+  SUBMITTED
+  IN_TRANSIT
+  RECEIVED_ACKNOWLEDGED
+  DISPUTED
+}
+
+model User {
+  id           String       @id @default(uuid())
+  badgeNumber  String       @unique
+  name         String
+  email        String       @unique
+  passwordHash String
+  role         Role         @default(INVESTIGATING_OFFICER)
+  department   String
+  station      String
+  designation  String
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  createdCases CaseRecord[] @relation("CaseCreator")
+  uploadedDocs Document[]   @relation("DocUploader")
+  custodySent  CustodyLog[] @relation("CustodyFrom")
+  custodyRecv  CustodyLog[] @relation("CustodyTo")
+}
+
+model CaseRecord {
+  id             String       @id @default(uuid())
+  caseNumber     String       @unique
+  firNumber      String       @unique
+  policeStation  String
+  incidentDate   DateTime
+  actAndSections String       // e.g. "IPC 302, IPC 120B" or "BNS 103, BNS 61"
+  complainant    String
+  accused        String
+  description    String
+  status         String       @default("UNDER_INVESTIGATION") // UNDER_INVESTIGATION, CHARGESHEET_FILED, IN_TRIAL, CLOSED
+  createdById    String
+  createdBy      User         @relation("CaseCreator", fields: [createdById], references: [id])
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  documents      Document[]
+  custodyLogs    CustodyLog[]
+}
+
+model Document {
+  id              String         @id @default(uuid())
+  caseId          String
+  case            CaseRecord     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  title           String
+  originalName    String
+  mimeType        String
+  fileSizeBytes   Int
+  filePath        String
+  fileHashSha256  String         // 64-char SHA-256 hex string of raw file bytes
+  ocrText         String?
+  extractedEntities String?      // JSON stringified regex/NLP parsed entities: dates, names, legal sections, FIR
+  documentType    String         // FIR_COPY, SEIZURE_MEMO, WITNESS_STATEMENT, FORENSIC_REPORT, EVIDENCE_PHOTO, BALLISTICS
+  status          DocumentStatus @default(PENDING_VERIFICATION)
+  isFrozen        Boolean        @default(false) // Freeze download if tampered
+  uploadedById    String
+  uploadedBy      User           @relation("DocUploader", fields: [uploadedById], references: [id])
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  custodyLogs     CustodyLog[]
+  ledgerRecords   LedgerNodeRecord[]
+  tamperAudits    TamperAudit[]
+}
+
+model CustodyLog {
+  id               String        @id @default(uuid())
+  documentId       String
+  document         Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  caseId           String
+  case             CaseRecord    @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  fromActorId      String
+  fromActor        User          @relation("CustodyFrom", fields: [fromActorId], references: [id])
+  toActorId        String
+  toActor          User          @relation("CustodyTo", fields: [toActorId], references: [id])
+  transferReason   String
+  transferLocation String
+  timestamp        DateTime      @default(now())
+  custodyHash      String        // Cryptographic SHA-256 hash of custody event
+  status           CustodyStatus @default(RECEIVED_ACKNOWLEDGED)
+  acknowledgementNote String?
+}
+
+model LedgerNodeRecord {
+  id                String   @id @default(uuid())
+  nodeName          String   // "Node 1 - Police Central", "Node 2 - State Forensics", "Node 3 - Judiciary Archive"
+  nodeId            Int      // 1, 2, or 3
+  documentId        String
+  document          Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  docHash           String   // Recorded SHA-256 hash
+  custodyHash       String?  // Chained custody hash
+  blockIndex        Int
+  previousBlockHash String
+  currentBlockHash  String
+  signature         String
+  timestamp         DateTime @default(now())
+  isCorrupted       Boolean  @default(false) // Used to simulate tampering/rogue node
+}
+
+model TamperAudit {
+  id                 String   @id @default(uuid())
+  documentId         String
+  document           Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  testedAt           DateTime @default(now())
+  localFileHash      String
+  node1Hash          String?
+  node2Hash          String?
+  node3Hash          String?
+  matchingNodesCount Int      // 0, 1, 2, or 3
+  consensusReached   Boolean  // True if >= 2 nodes match raw file hash
+  verdict            String   // "VERIFIED", "TAMPERED_INCONSISTENT", "NODE_DESYNC"
+  flagged            Boolean  @default(false)
+  discrepancyDetails String?
+}

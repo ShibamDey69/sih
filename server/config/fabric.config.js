@@ -1,0 +1,67 @@
+export const FABRIC_CONFIG = {
+  NETWORK_NAME: 'LexLedger-Hyperledger-Fabric-Consortium',
+  CHANNEL_ID: 'evidence-consortium-channel',
+  CHAINCODE_NAME: 'evidence_custody_cc',
+  CHAINCODE_VERSION: '2.0.0',
+  ORDERER_TYPE: 'etcdraft',
+  ORDERER_ENDPOINT: 'orderer0.consortium.gov.in:7050',
+  ENDORSEMENT_POLICY: "OutOf(2, 'PoliceMSP.peer', 'ForensicsMSP.peer', 'JudiciaryMSP.peer')",
+  ENDORSEMENT_THRESHOLD: 2,
+  TOTAL_MSPS: 3,
+  ALGORITHM: 'SHA-256',
+  STATE_DATABASE: 'CouchDB',
+  GENESIS_BLOCK_HASH: '0000000000000000000000000000000000000000000000000000000000000000',
+  ALLOW_AUTO_RECONCILE: true,
+};
+
+export const FABRIC_MSPS = [
+  {
+    mspId: 'PoliceMSP',
+    organizationName: 'State Police Department & Crime Records Bureau',
+    shortName: 'Police MSP',
+    peerEndpoint: 'peer0.police.gov.in:7051',
+    caEndpoint: 'ca.police.gov.in:7054',
+    tlsEnabled: true,
+    couchDbPort: 5984,
+    status: 'ONLINE',
+    roleAffiliations: ['INVESTIGATING_OFFICER', 'STATION_IN_CHARGE', 'ADMIN'],
+    adminCertSubject: 'CN=Admin@police.gov.in,OU=Admin,O=PoliceMSP,L=NewDelhi,ST=Delhi,C=IN',
+  },
+  {
+    mspId: 'ForensicsMSP',
+    organizationName: 'Central Forensic Science Laboratory (CFSL)',
+    shortName: 'Forensics MSP',
+    peerEndpoint: 'peer0.forensics.gov.in:8051',
+    caEndpoint: 'ca.forensics.gov.in:8054',
+    tlsEnabled: true,
+    couchDbPort: 6984,
+    status: 'ONLINE',
+    roleAffiliations: ['FORENSIC_EXAMINER'],
+    adminCertSubject: 'CN=Admin@forensics.gov.in,OU=Admin,O=ForensicsMSP,L=NewDelhi,ST=Delhi,C=IN',
+  },
+  {
+    mspId: 'JudiciaryMSP',
+    organizationName: 'Judicial High Court Electronic Evidence Vault',
+    shortName: 'Judiciary MSP',
+    peerEndpoint: 'peer0.judiciary.gov.in:9051',
+    caEndpoint: 'ca.judiciary.gov.in:9054',
+    tlsEnabled: true,
+    couchDbPort: 7984,
+    status: 'ONLINE',
+    roleAffiliations: ['PROSECUTOR', 'COURT_CLERK_JUDGE'],
+    adminCertSubject: 'CN=Admin@judiciary.gov.in,OU=Admin,O=JudiciaryMSP,L=NewDelhi,ST=Delhi,C=IN',
+  },
+];
+
+export const FABRIC_RAFT_CLUSTER = {
+  clusterId: 'consortium-raft-cluster-1',
+  orderers: [
+    { name: 'orderer0.consortium.gov.in', port: 7050, role: 'LEADER', status: 'ACTIVE' },
+    { name: 'orderer1.consortium.gov.in', port: 7052, role: 'FOLLOWER', status: 'ACTIVE' },
+    { name: 'orderer2.consortium.gov.in', port: 7053, role: 'FOLLOWER', status: 'ACTIVE' },
+  ],
+  batchTimeout: '500ms',
+  maxMessageCount: 10,
+  absoluteMaxBytes: 10485760,
+  preferredMaxBytes: 2097152,
+};
