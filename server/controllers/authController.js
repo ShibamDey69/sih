@@ -27,6 +27,7 @@ export class AuthController {
 
   static async getMe(req, res) {
     try {
+      console.log(req.user);
       const user = await AuthService.getUserById(req.user.id);
       return successResponse(res, 'Current user profile retrieved', user);
     } catch (err) {

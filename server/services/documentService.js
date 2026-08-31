@@ -36,14 +36,15 @@ export class DocumentService {
     const bufferToHash = fileBuffer || Buffer.from(rawTextContent || title || Date.now().toString());
     const fileHashSha256 = HashService.hashRawBytes(bufferToHash);
 
+    const docId = `doc-${Date.now().toString().slice(-6)}`;
+    const now = new Date();
+
     const ocrResult = await OcrEntityService.processDocumentOcr(
       fileBuffer || rawTextContent || '',
       mimeType,
-      originalName
+      originalName,
+      { docId }
     );
-
-    const docId = `doc-${Date.now().toString().slice(-6)}`;
-    const now = new Date();
 
     const newDocument = {
       id: docId,
@@ -55,6 +56,10 @@ export class DocumentService {
       filePath: `/evidence/${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, '0')}/${docId}_${originalName}`,
       fileHashSha256,
       ocrText: ocrResult.ocrText,
+      ocrConfidence: ocrResult.confidence,
+      pageCount: ocrResult.pageCount || 1,
+      pages: ocrResult.pages || [],
+      ocrEngine: ocrResult.ocrEngine,
       extractedEntities: JSON.stringify(ocrResult.entities),
       documentType: documentType || 'EVIDENCE_PHOTO',
       status: DOCUMENT_STATUS.PENDING_VERIFICATION,
@@ -77,15 +82,24 @@ export class DocumentService {
       newDocument.status = DOCUMENT_STATUS.VERIFIED;
     }
 
-    logger.info('DOCUMENT_SERVICE', `Document [${docId}] successfully created, OCR parsed, and written to 3-Node Ledger.`);
+    logger.info('DOCUMENT_SERVICE', `Document [${docId}] successfully created, OCR parsed (${ocrResult.pageCount || 1} pages, ${ocrResult.confidence}% confidence), and written to 3-Node Ledger.`);
 
     return {
       document: {
         ...newDocument,
         extractedEntitiesParsed: ocrResult.entities,
+        ocrBreakdown: {
+          pageCount: ocrResult.pageCount,
+          successfulPages: ocrResult.successfulPages,
+          failedPages: ocrResult.failedPages,
+          confidence: ocrResult.confidence,
+          ocrEngine: ocrResult.ocrEngine,
+          pages: ocrResult.pages,
+        },
       },
       ledgerCommit: ledgerResult,
       sha256: fileHashSha256,
+      ocrResult,
     };
   }
 

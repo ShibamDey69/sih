@@ -55,13 +55,13 @@ export const extractEntitiesFromText = (rawText = '') => {
   const cleanSeized = Array.from(new Set(seizedMatches.map(s => s.replace(/(?:Seized\s+Articles?|Recovered\s+Items?|Evidence\s+Seized)\s*[:.-]?\s*/i, '').trim()).filter(Boolean)));
 
   return {
-    legalSections: cleanSections.length > 0 ? cleanSections : ['IPC 302', 'BNS 103 (Murder/Offences against life)'],
-    firNumbers: cleanFirs.length > 0 ? cleanFirs : ['FIR No. 142/2026'],
-    policeStations: cleanPS.length > 0 ? cleanPS : ['Central Cyber & Homicide Division'],
-    dates: cleanDates.length > 0 ? cleanDates : [new Date().toLocaleDateString('en-GB')],
-    accusedPersons: cleanAccused.length > 0 ? cleanAccused : ['Vikram Malhotra', 'Unknown Accomplice'],
-    complainants: cleanComplainants.length > 0 ? cleanComplainants : ['Rajesh Kumar Verma'],
-    investigatingOfficers: cleanIOs.length > 0 ? cleanIOs : ['Insp. Amit Sharma (Badge #DL-8841)'],
-    seizedArticles: cleanSeized.length > 0 ? cleanSeized : ['Encrypted SanDisk 1TB SSD', 'Ballistic Shell Casings (9mm)'],
+    legalSections: cleanSections,
+    firNumbers: cleanFirs,
+    policeStations: cleanPS,
+    dates: cleanDates,
+    accusedPersons: cleanAccused,
+    complainants: cleanComplainants,
+    investigatingOfficers: cleanIOs,
+    seizedArticles: cleanSeized,
   };
 };

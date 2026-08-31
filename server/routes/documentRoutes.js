@@ -7,6 +7,14 @@ import { ROLES } from '../config/constants.js';
 
 const router = Router();
 
+// Public / Playground OCR pipeline testing endpoint
+router.post('/ocr-preview', upload.single('file'), DocumentController.ocrPreview);
+router.post('/ocr-process', upload.single('file'), DocumentController.ocrPreview);
+
+// Public Direct Page Image Viewer (opens in browser directly)
+router.get('/page-image', DocumentController.getPageImage);
+router.get('/:docId/page/:pageNumber/image', DocumentController.getPageImage);
+
 router.use(authenticateJwt);
 
 router.get('/', DocumentController.getAllDocuments);
