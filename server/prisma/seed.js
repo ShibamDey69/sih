@@ -1,8 +1,10 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
+import { prisma } from './client.js';
 import { ROLES, DOCUMENT_STATUS, CUSTODY_STATUS } from '../config/constants.js';
+import { logger } from '../utils/logger.js';
 
-export const generateSha256 = (content) => {
+/*export const generateSha256 = (content) => {
   return crypto.createHash('sha256').update(content).digest('hex');
 };
 
@@ -20,6 +22,7 @@ export const defaultUsers = [
     station: 'Central Division Police Station, New Delhi',
     designation: 'Senior Investigating Officer',
     createdAt: new Date('2026-08-01T09:00:00Z'),
+    updatedAt: new Date('2026-08-01T09:00:00Z'),
   },
   {
     id: 'usr-sho-01',
@@ -32,6 +35,7 @@ export const defaultUsers = [
     station: 'Central Division Police Station, New Delhi',
     designation: 'Station In-Charge (SHO)',
     createdAt: new Date('2026-08-01T09:00:00Z'),
+    updatedAt: new Date('2026-08-01T09:00:00Z'),
   },
   {
     id: 'usr-fsl-01',
@@ -44,6 +48,7 @@ export const defaultUsers = [
     station: 'Central Forensic Science Laboratory (CFSL), New Delhi',
     designation: 'Senior Scientific Officer (Forensic Ballistics)',
     createdAt: new Date('2026-08-01T09:00:00Z'),
+    updatedAt: new Date('2026-08-01T09:00:00Z'),
   },
   {
     id: 'usr-pros-01',
@@ -56,6 +61,7 @@ export const defaultUsers = [
     station: 'State Legal & Prosecution Bureau',
     designation: 'Chief Public Prosecutor',
     createdAt: new Date('2026-08-01T09:00:00Z'),
+    updatedAt: new Date('2026-08-01T09:00:00Z'),
   },
   {
     id: 'usr-judge-01',
@@ -68,6 +74,7 @@ export const defaultUsers = [
     station: 'Principal Bench, Court Room 04',
     designation: 'Judicial Registrar / Magistrate',
     createdAt: new Date('2026-08-01T09:00:00Z'),
+    updatedAt: new Date('2026-08-01T09:00:00Z'),
   },
 ];
 
@@ -214,14 +221,17 @@ export const defaultCustodyLogs = [
   },
 ];
 
-export const buildLedgerBlock = (nodeId, nodeName, docId, docHash, custodyHash, blockIdx, prevHash) => {
+export const buildLedgerBlock = (nodeId, nodeName, docId, docHash, custodyHash, blockIdx, prevHash, mspId) => {
   const payload = `${nodeId}:${docId}:${docHash}:${custodyHash || ''}:${blockIdx}:${prevHash}`;
   const currentBlockHash = generateSha256(payload);
   const signature = `SIG_NODE_${nodeId}_` + generateSha256(`SIGN:${nodeId}:${currentBlockHash}`).substring(0, 32);
   return {
     id: `blk-n${nodeId}-${blockIdx}`,
+    channelId: 'evidence-consortium-channel',
+    chaincodeId: 'evidence_custody_cc',
     nodeName,
     nodeId,
+    mspId: mspId || (nodeId === 1 ? 'PoliceMSP' : nodeId === 2 ? 'ForensicsMSP' : 'JudiciaryMSP'),
     documentId: docId,
     docHash,
     custodyHash,
@@ -237,14 +247,14 @@ export const buildLedgerBlock = (nodeId, nodeName, docId, docHash, custodyHash, 
 const GENESIS = '0000000000000000000000000000000000000000000000000000000000000000';
 
 export const defaultLedgerRecords = [
-  buildLedgerBlock(1, 'Node 1 - Police Central Ledger', 'doc-001', fir1Hash, custodyHash1, 1, GENESIS),
-  buildLedgerBlock(1, 'Node 1 - Police Central Ledger', 'doc-002', ballisticsHash, null, 2, 'b17a89ffc9029a1b667e41'),
+  buildLedgerBlock(1, 'Peer 0 - Police Central MSP', 'doc-001', fir1Hash, custodyHash1, 1, GENESIS, 'PoliceMSP'),
+  buildLedgerBlock(1, 'Peer 0 - Police Central MSP', 'doc-002', ballisticsHash, null, 2, 'b17a89ffc9029a1b667e41', 'PoliceMSP'),
 
-  buildLedgerBlock(2, 'Node 2 - Forensic & State Repository', 'doc-001', fir1Hash, custodyHash1, 1, GENESIS),
-  buildLedgerBlock(2, 'Node 2 - Forensic & State Repository', 'doc-002', ballisticsHash, null, 2, 'b17a89ffc9029a1b667e41'),
+  buildLedgerBlock(2, 'Peer 0 - Forensic & State CFSL MSP', 'doc-001', fir1Hash, custodyHash1, 1, GENESIS, 'ForensicsMSP'),
+  buildLedgerBlock(2, 'Peer 0 - Forensic & State CFSL MSP', 'doc-002', ballisticsHash, null, 2, 'b17a89ffc9029a1b667e41', 'ForensicsMSP'),
 
-  buildLedgerBlock(3, 'Node 3 - Judicial & High Court Archive', 'doc-001', fir1Hash, custodyHash1, 1, GENESIS),
-  buildLedgerBlock(3, 'Node 3 - Judicial & High Court Archive', 'doc-002', ballisticsHash, null, 2, 'b17a89ffc9029a1b667e41'),
+  buildLedgerBlock(3, 'Peer 0 - Judicial High Court MSP', 'doc-001', fir1Hash, custodyHash1, 1, GENESIS, 'JudiciaryMSP'),
+  buildLedgerBlock(3, 'Peer 0 - Judicial High Court MSP', 'doc-002', ballisticsHash, null, 2, 'b17a89ffc9029a1b667e41', 'JudiciaryMSP'),
 ];
 
 export const defaultTamperAudits = [
@@ -264,11 +274,73 @@ export const defaultTamperAudits = [
   },
 ];
 
-export const initialSeedData = {
-  users: defaultUsers,
-  cases: defaultCases,
-  documents: defaultDocuments,
-  custodyLogs: defaultCustodyLogs,
-  ledgerRecords: defaultLedgerRecords,
-  tamperAudits: defaultTamperAudits,
+export const seedDatabase = async () => {
+  logger.info('PRISMA_SEED', 'Starting database seeding into Neon PostgreSQL...');
+
+  for (const user of defaultUsers) {
+    await prisma.user.upsert({
+      where: { email: user.email },
+      update: {},
+      create: user,
+    });
+  }
+  logger.info('PRISMA_SEED', `Seeded ${defaultUsers.length} authorized users.`);
+
+  for (const c of defaultCases) {
+    await prisma.caseRecord.upsert({
+      where: { caseNumber: c.caseNumber },
+      update: {},
+      create: c,
+    });
+  }
+  logger.info('PRISMA_SEED', `Seeded ${defaultCases.length} case dockets.`);
+
+  for (const doc of defaultDocuments) {
+    await prisma.document.upsert({
+      where: { id: doc.id },
+      update: {},
+      create: doc,
+    });
+  }
+  logger.info('PRISMA_SEED', `Seeded ${defaultDocuments.length} evidence documents.`);
+
+  for (const log of defaultCustodyLogs) {
+    await prisma.custodyLog.upsert({
+      where: { id: log.id },
+      update: {},
+      create: log,
+    });
+  }
+  logger.info('PRISMA_SEED', `Seeded ${defaultCustodyLogs.length} chain of custody logs.`);
+
+  for (const block of defaultLedgerRecords) {
+    await prisma.ledgerNodeRecord.upsert({
+      where: { id: block.id },
+      update: {},
+      create: block,
+    });
+  }
+  logger.info('PRISMA_SEED', `Seeded ${defaultLedgerRecords.length} Hyperledger Fabric ledger block records.`);
+
+  for (const audit of defaultTamperAudits) {
+    await prisma.tamperAudit.upsert({
+      where: { id: audit.id },
+      update: {},
+      create: audit,
+    });
+  }
+  logger.info('PRISMA_SEED', `Seeded ${defaultTamperAudits.length} tamper audit records.`);
+
+  logger.info('PRISMA_SEED', 'Neon PostgreSQL database seeding completed successfully.');
 };
+
+if (process.argv[1] && process.argv[1].endsWith('seed.js')) {
+  seedDatabase()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      logger.error('PRISMA_SEED', 'Database seeding failed', err);
+      process.exit(1);
+    });
+}
+
+*/

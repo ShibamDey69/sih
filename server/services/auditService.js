@@ -1,31 +1,36 @@
-import { dbStore } from '../prisma/client.js';
-import { initialSeedData } from '../prisma/seed.js';
 import { LEDGER_NODES } from '../config/constants.js';
+import { prisma } from '../prisma/client.js';
 
 export class AuditService {
-  static _ensureInit() {
-    if (!dbStore.initialized) {
-      dbStore.initSeed(initialSeedData);
-    }
-  }
-
   static async getSystemMetrics() {
-    this._ensureInit();
-
-    const totalCases = dbStore.cases.length;
-    const totalDocuments = dbStore.documents.length;
-    const verifiedDocuments = dbStore.documents.filter(d => d.status === 'VERIFIED').length;
-    const tamperedDocuments = dbStore.documents.filter(d => d.status === 'TAMPERED_FLAGGED' || d.isFrozen).length;
-    const totalCustodyLogs = dbStore.custodyLogs.length;
-    const totalLedgerBlocks = dbStore.ledgerRecords.length;
+    const [
+      totalCases,
+      totalDocuments,
+      verifiedDocuments,
+      tamperedDocuments,
+      totalCustodyLogs,
+      totalLedgerBlocks,
+      ledgerRecords,
+      recentAudits,
+    ] = await Promise.all([
+      prisma.caseRecord.count(),
+      prisma.document.count(),
+      prisma.document.count({ where: { status: 'VERIFIED' } }),
+      prisma.document.count({ where: { OR: [{ status: 'TAMPERED_FLAGGED' }, { isFrozen: true }] } }),
+      prisma.custodyLog.count(),
+      prisma.ledgerNodeRecord.count(),
+      prisma.ledgerNodeRecord.findMany(),
+      prisma.tamperAudit.findMany({ orderBy: { testedAt: 'desc' }, take: 10 }),
+    ]);
 
     const nodeStatus = LEDGER_NODES.map(n => {
-      const corruptedBlocks = dbStore.ledgerRecords.filter(r => r.nodeId === n.id && r.isCorrupted).length;
+      const nodeBlocks = ledgerRecords.filter(r => r.nodeId === n.id || r.mspId === n.mspId);
+      const corruptedBlocks = nodeBlocks.filter(r => r.isCorrupted).length;
       return {
         ...n,
         health: corruptedBlocks > 0 ? 'DEGRADED / TAMPER_DETECTED' : 'HEALTHY_SYNCED',
         corruptedBlocksCount: corruptedBlocks,
-        totalBlocks: dbStore.ledgerRecords.filter(r => r.nodeId === n.id).length,
+        totalBlocks: nodeBlocks.length,
       };
     });
 
@@ -37,18 +42,25 @@ export class AuditService {
       totalCustodyLogs,
       totalLedgerBlocks,
       nodeStatus,
-      recentAudits: dbStore.tamperAudits.slice(0, 10),
+      recentAudits,
     };
   }
 
   static async generateVerificationCertificate(documentId) {
-    this._ensureInit();
-    const doc = dbStore.documents.find(d => d.id === documentId);
+    const doc = await prisma.document.findUnique({
+      where: { id: documentId },
+      include: {
+        case: true,
+        ledgerRecords: true,
+        custodyLogs: true,
+      },
+    });
+
     if (!doc) throw new Error(`Document ${documentId} not found`);
 
-    const caseRecord = dbStore.cases.find(c => c.id === doc.caseId);
-    const nodeBlocks = dbStore.ledgerRecords.filter(r => r.documentId === documentId);
-    const custodyTrail = dbStore.custodyLogs.filter(cl => cl.documentId === documentId);
+    const caseRecord = doc.case;
+    const nodeBlocks = doc.ledgerRecords || [];
+    const custodyTrail = doc.custodyLogs || [];
 
     const certificate = {
       certificateNumber: `CERT-SEC65B-2026-${Math.floor(100000 + Math.random() * 900000)}`,
@@ -66,8 +78,8 @@ export class AuditService {
         nodeId: n.id,
         nodeName: n.name,
         authority: n.authority,
-        blockSignature: nodeBlocks.find(b => b.nodeId === n.id)?.signature || 'N/A',
-        timestamp: nodeBlocks.find(b => b.nodeId === n.id)?.timestamp || 'N/A',
+        blockSignature: nodeBlocks.find(b => b.nodeId === n.id || b.mspId === n.mspId)?.signature || 'N/A',
+        timestamp: nodeBlocks.find(b => b.nodeId === n.id || b.mspId === n.mspId)?.timestamp || 'N/A',
       })),
       chainOfCustodyHandoffs: custodyTrail.length,
       digitalSeal: `LEDGER_IMMUTABLE_SEAL_V2_${doc.fileHashSha256.substring(0, 24)}`,
@@ -76,3 +88,4 @@ export class AuditService {
     return certificate;
   }
 }
+

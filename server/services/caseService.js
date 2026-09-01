@@ -1,107 +1,145 @@
-import { dbStore } from '../prisma/client.js';
-import { initialSeedData } from '../prisma/seed.js';
+import { prisma } from '../prisma/client.js';
 import { logger } from '../utils/logger.js';
 
 export class CaseService {
-  static _ensureInit() {
-    if (!dbStore.initialized) {
-      dbStore.initSeed(initialSeedData);
-    }
-  }
-
   static async getAllCases(filters = {}) {
-    this._ensureInit();
-    let cases = [...dbStore.cases];
+    const where = {};
 
     if (filters.status) {
-      cases = cases.filter(c => c.status === filters.status);
-    }
-    if (filters.policeStation) {
-      cases = cases.filter(c => c.policeStation.toLowerCase().includes(filters.policeStation.toLowerCase()));
+      where.status = filters.status;
     }
 
-    return cases.map(c => {
-      const docs = dbStore.documents.filter(d => d.caseId === c.id);
-      const custody = dbStore.custodyLogs.filter(cl => cl.caseId === c.id);
-      const createdBy = dbStore.users.find(u => u.id === c.createdById);
-      return {
-        ...c,
-        documentCount: docs.length,
-        documents: docs,
-        custodyHistoryCount: custody.length,
-        createdByName: createdBy ? createdBy.name : 'Unknown Officer',
+    if (filters.policeStation) {
+      where.policeStation = {
+        contains: filters.policeStation,
+        mode: 'insensitive',
       };
+    }
+
+    const cases = await prisma.caseRecord.findMany({
+      where,
+      include: {
+        documents: true,
+        custodyLogs: true,
+        createdBy: {
+          select: {
+            id: true,
+            name: true,
+            role: true,
+            badgeNumber: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
     });
+
+    return cases.map(c => ({
+      ...c,
+      documentCount: c.documents ? c.documents.length : 0,
+      custodyHistoryCount: c.custodyLogs ? c.custodyLogs.length : 0,
+      createdByName: c.createdBy ? c.createdBy.name : 'Unknown Officer',
+    }));
   }
 
   static async getCaseById(caseId) {
-    this._ensureInit();
-    const caseRecord = dbStore.cases.find(c => c.id === caseId);
+    const caseRecord = await prisma.caseRecord.findUnique({
+      where: { id: caseId },
+      include: {
+        createdBy: {
+          select: {
+            id: true,
+            name: true,
+            role: true,
+            badgeNumber: true,
+          },
+        },
+        documents: {
+          orderBy: { createdAt: 'desc' },
+        },
+        custodyLogs: {
+          include: {
+            fromActor: {
+              select: { id: true, name: true, role: true, badgeNumber: true, station: true },
+            },
+            toActor: {
+              select: { id: true, name: true, role: true, badgeNumber: true, station: true },
+            },
+            document: {
+              select: { id: true, title: true, documentType: true },
+            },
+          },
+          orderBy: { timestamp: 'asc' },
+        },
+      },
+    });
+
     if (!caseRecord) {
       throw new Error(`Case not found with ID: ${caseId}`);
     }
 
-    const documents = dbStore.documents.filter(d => d.caseId === caseId);
-    const custodyLogs = dbStore.custodyLogs.filter(cl => cl.caseId === caseId).map(log => {
-      const fromActor = dbStore.users.find(u => u.id === log.fromActorId);
-      const toActor = dbStore.users.find(u => u.id === log.toActorId);
-      const doc = dbStore.documents.find(d => d.id === log.documentId);
-      return {
-        ...log,
-        fromActorName: fromActor ? fromActor.name : 'Unknown',
-        fromActorRole: fromActor ? fromActor.role : 'Unknown',
-        toActorName: toActor ? toActor.name : 'Unknown',
-        toActorRole: toActor ? toActor.role : 'Unknown',
-        documentTitle: doc ? doc.title : 'Document',
-      };
-    });
-
-    const createdBy = dbStore.users.find(u => u.id === caseRecord.createdById);
+    const formattedCustodyLogs = (caseRecord.custodyLogs || []).map(log => ({
+      ...log,
+      fromActorName: log.fromActor ? log.fromActor.name : 'Unknown',
+      fromActorRole: log.fromActor ? log.fromActor.role : 'Unknown',
+      toActorName: log.toActor ? log.toActor.name : 'Unknown',
+      toActorRole: log.toActor ? log.toActor.role : 'Unknown',
+      documentTitle: log.document ? log.document.title : 'Document',
+    }));
 
     return {
       ...caseRecord,
-      createdBy: createdBy ? { id: createdBy.id, name: createdBy.name, role: createdBy.role, badge: createdBy.badgeNumber } : null,
-      documents,
-      custodyLogs,
+      custodyLogs: formattedCustodyLogs,
     };
   }
 
   static async createCase(caseData, user) {
-    this._ensureInit();
-
-    const newId = `case-${Date.now().toString().slice(-6)}`;
     const now = new Date();
 
-    const newCase = {
-      id: newId,
-      caseNumber: caseData.caseNumber || `CASE/${now.getFullYear()}/DIV/${Math.floor(1000 + Math.random() * 9000)}`,
-      firNumber: caseData.firNumber || `FIR No. ${Math.floor(100 + Math.random() * 900)}/${now.getFullYear()}`,
-      policeStation: caseData.policeStation || user.station || 'Central Division PS',
-      incidentDate: caseData.incidentDate ? new Date(caseData.incidentDate) : now,
-      actAndSections: caseData.actAndSections || 'IPC 302, IPC 120B | BNS 103(1)',
-      complainant: caseData.complainant || 'State / Suo Motu',
-      accused: caseData.accused || 'Unknown Suspects',
-      description: caseData.description || 'Crime investigation docket initiated.',
-      status: 'UNDER_INVESTIGATION',
-      createdById: user.id,
-      createdAt: now,
-      updatedAt: now,
-    };
+    const created = await prisma.caseRecord.create({
+      data: {
+        caseNumber: caseData.caseNumber || `CASE/${now.getFullYear()}/DIV/${Math.floor(1000 + Math.random() * 9000)}`,
+        firNumber: caseData.firNumber || `FIR No. ${Math.floor(100 + Math.random() * 900)}/${now.getFullYear()}`,
+        policeStation: caseData.policeStation || user.station || 'Central Division PS',
+        incidentDate: caseData.incidentDate ? new Date(caseData.incidentDate) : now,
+        actAndSections: caseData.actAndSections || 'IPC 302, IPC 120B | BNS 103(1)',
+        complainant: caseData.complainant || 'State / Suo Motu',
+        accused: caseData.accused || 'Unknown Suspects',
+        description: caseData.description || 'Crime investigation docket initiated.',
+        status: 'UNDER_INVESTIGATION',
+        createdById: user.id,
+      },
+      include: {
+        createdBy: {
+          select: { id: true, name: true, role: true, badgeNumber: true },
+        },
+      },
+    });
 
-    dbStore.cases.unshift(newCase);
-    logger.info('CASE_SERVICE', `New Case Registered: ${newCase.firNumber} (${newCase.caseNumber})`);
-    return newCase;
+    logger.info('CASE_SERVICE', `New Case Registered: ${created.firNumber} (${created.caseNumber})`);
+    return created;
   }
 
   static async updateCaseStatus(caseId, status) {
-    this._ensureInit();
-    const caseRecord = dbStore.cases.find(c => c.id === caseId);
-    if (!caseRecord) {
+    const existing = await prisma.caseRecord.findUnique({
+      where: { id: caseId },
+    });
+
+    if (!existing) {
       throw new Error(`Case not found: ${caseId}`);
     }
-    caseRecord.status = status;
-    caseRecord.updatedAt = new Date();
+
+    const updated = await prisma.caseRecord.update({
+      where: { id: caseId },
+      data: { status },
+      include: {
+        createdBy: {
+          select: { id: true, name: true, role: true, badgeNumber: true },
+        },
+      },
+    });
+
     logger.info('CASE_SERVICE', `Case ${caseId} status updated to ${status}`);
-    return caseRecord;
+    return updated;
   }
 }
+

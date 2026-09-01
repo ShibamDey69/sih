@@ -1,16 +1,9 @@
 import crypto from 'crypto';
 import { FABRIC_CONFIG, FABRIC_MSPS } from '../config/fabric.config.js';
-import { dbStore } from '../prisma/client.js';
-import { initialSeedData } from '../prisma/seed.js';
+import { prisma } from '../prisma/client.js';
 import { logger } from '../utils/logger.js';
 
 export class FabricChaincodeService {
-  static _ensureInit() {
-    if (!dbStore.initialized) {
-      dbStore.initSeed(initialSeedData);
-    }
-  }
-
   static generateFabricIdentity(actor = {}) {
     const actorName = actor?.name || actor?.username || actor?.badgeNumber || 'Officer';
     const actorRole = actor?.role || 'INVESTIGATING_OFFICER';
@@ -36,7 +29,6 @@ export class FabricChaincodeService {
     metadata = {},
     uploaderIdentity,
   }) {
-    this._ensureInit();
     logger.info('FABRIC_CHAINCODE', `[CreateEvidenceRecord] Executing chaincode on channel "${FABRIC_CONFIG.CHANNEL_ID}" for Doc [${docId}]`);
 
     const txId = crypto.randomBytes(32).toString('hex');
@@ -80,35 +72,39 @@ export class FabricChaincodeService {
       throw new Error(`Endorsement Policy Violation: Expected at least ${FABRIC_CONFIG.ENDORSEMENT_THRESHOLD} MSP signatures, received ${validEndorsements.length}`);
     }
 
-    const existingBlocks = dbStore.ledgerRecords.filter(r => r.channelId === FABRIC_CONFIG.CHANNEL_ID || r.nodeId === 1);
-    const blockNumber = (existingBlocks.length > 0 ? Math.max(...existingBlocks.map(b => b.blockIndex || 1)) : 0) + 1;
-    const prevBlockHash = existingBlocks.length > 0 ? existingBlocks[existingBlocks.length - 1].currentBlockHash : FABRIC_CONFIG.GENESIS_BLOCK_HASH;
+    const latestBlock = await prisma.ledgerNodeRecord.findFirst({
+      orderBy: { blockIndex: 'desc' },
+    });
+
+    const blockNumber = (latestBlock?.blockIndex || 0) + 1;
+    const prevBlockHash = latestBlock?.currentBlockHash || FABRIC_CONFIG.GENESIS_BLOCK_HASH;
 
     const dataHash = crypto.createHash('sha256').update(JSON.stringify(worldStateAsset)).digest('hex');
     const blockHeaderPayload = `${blockNumber}:${prevBlockHash}:${dataHash}:${txId}`;
     const currentBlockHash = crypto.createHash('sha256').update(blockHeaderPayload).digest('hex');
 
-    FABRIC_MSPS.forEach((msp, idx) => {
-      const blockRecord = {
-        id: `blk-${msp.mspId}-${docId}-${Date.now().toString().slice(-4)}`,
-        channelId: FABRIC_CONFIG.CHANNEL_ID,
-        chaincodeId: FABRIC_CONFIG.CHAINCODE_NAME,
-        nodeId: idx + 1,
-        mspId: msp.mspId,
-        nodeName: msp.organizationName,
-        documentId: docId,
-        docHash,
-        custodyHash: docHash,
-        blockIndex: blockNumber,
-        previousBlockHash: prevBlockHash,
-        currentBlockHash,
-        dataHash,
-        txId,
-        signature: endorsements[idx]?.endorserSignature,
-        timestamp: new Date(),
-        isCorrupted: false,
-      };
-      dbStore.ledgerRecords.push(blockRecord);
+    const blockRecordsData = FABRIC_MSPS.map((msp, idx) => ({
+      id: `blk-${msp.mspId}-${docId}-${Date.now().toString().slice(-4)}-${idx}`,
+      channelId: FABRIC_CONFIG.CHANNEL_ID,
+      chaincodeId: FABRIC_CONFIG.CHAINCODE_NAME,
+      nodeId: idx + 1,
+      mspId: msp.mspId,
+      nodeName: msp.organizationName,
+      documentId: docId,
+      docHash,
+      custodyHash: docHash,
+      blockIndex: blockNumber,
+      previousBlockHash: prevBlockHash,
+      currentBlockHash,
+      dataHash,
+      txId,
+      signature: endorsements[idx]?.endorserSignature,
+      timestamp: new Date(),
+      isCorrupted: false,
+    }));
+
+    await prisma.ledgerNodeRecord.createMany({
+      data: blockRecordsData,
     });
 
     return {
@@ -133,7 +129,6 @@ export class FabricChaincodeService {
     transferLocation,
     custodyHash,
   }) {
-    this._ensureInit();
     logger.info('FABRIC_CHAINCODE', `[TransferCustody] Executing custody hand-off on channel "${FABRIC_CONFIG.CHANNEL_ID}" for Doc [${docId}]`);
 
     const txId = crypto.randomBytes(32).toString('hex');
@@ -154,39 +149,45 @@ export class FabricChaincodeService {
       };
     });
 
-    const existingBlocks = dbStore.ledgerRecords.filter(r => r.channelId === FABRIC_CONFIG.CHANNEL_ID || r.nodeId === 1);
-    const blockNumber = (existingBlocks.length > 0 ? Math.max(...existingBlocks.map(b => b.blockIndex || 1)) : 0) + 1;
-    const prevBlockHash = existingBlocks.length > 0 ? existingBlocks[existingBlocks.length - 1].currentBlockHash : FABRIC_CONFIG.GENESIS_BLOCK_HASH;
+    const latestBlock = await prisma.ledgerNodeRecord.findFirst({
+      orderBy: { blockIndex: 'desc' },
+    });
+
+    const blockNumber = (latestBlock?.blockIndex || 0) + 1;
+    const prevBlockHash = latestBlock?.currentBlockHash || FABRIC_CONFIG.GENESIS_BLOCK_HASH;
 
     const dataPayload = JSON.stringify({ docId, fromActor: fromActor.id, toActor: toActor.id, custodyHash, transferReason, transferLocation });
     const dataHash = crypto.createHash('sha256').update(dataPayload).digest('hex');
     const blockHeaderPayload = `${blockNumber}:${prevBlockHash}:${dataHash}:${txId}`;
     const currentBlockHash = crypto.createHash('sha256').update(blockHeaderPayload).digest('hex');
 
-    const doc = dbStore.documents.find(d => d.id === docId);
+    const doc = await prisma.document.findUnique({
+      where: { id: docId },
+    });
     const fileHash = doc ? doc.fileHashSha256 : custodyHash;
 
-    FABRIC_MSPS.forEach((msp, idx) => {
-      const blockRecord = {
-        id: `blk-${msp.mspId}-${docId}-cust-${Date.now().toString().slice(-4)}`,
-        channelId: FABRIC_CONFIG.CHANNEL_ID,
-        chaincodeId: FABRIC_CONFIG.CHAINCODE_NAME,
-        nodeId: idx + 1,
-        mspId: msp.mspId,
-        nodeName: msp.organizationName,
-        documentId: docId,
-        docHash: fileHash,
-        custodyHash,
-        blockIndex: blockNumber,
-        previousBlockHash: prevBlockHash,
-        currentBlockHash,
-        dataHash,
-        txId,
-        signature: endorsements[idx]?.endorserSignature,
-        timestamp: new Date(),
-        isCorrupted: false,
-      };
-      dbStore.ledgerRecords.push(blockRecord);
+    const blockRecordsData = FABRIC_MSPS.map((msp, idx) => ({
+      id: `blk-${msp.mspId}-${docId}-cust-${Date.now().toString().slice(-4)}-${idx}`,
+      channelId: FABRIC_CONFIG.CHANNEL_ID,
+      chaincodeId: FABRIC_CONFIG.CHAINCODE_NAME,
+      nodeId: idx + 1,
+      mspId: msp.mspId,
+      nodeName: msp.organizationName,
+      documentId: docId,
+      docHash: fileHash,
+      custodyHash,
+      blockIndex: blockNumber,
+      previousBlockHash: prevBlockHash,
+      currentBlockHash,
+      dataHash,
+      txId,
+      signature: endorsements[idx]?.endorserSignature,
+      timestamp: new Date(),
+      isCorrupted: false,
+    }));
+
+    await prisma.ledgerNodeRecord.createMany({
+      data: blockRecordsData,
     });
 
     return {
@@ -205,18 +206,25 @@ export class FabricChaincodeService {
   }
 
   static async VerifyEvidenceIntegrity(ctx, docId, localFileHash = null) {
-    this._ensureInit();
     logger.info('FABRIC_CHAINCODE', `[VerifyEvidenceIntegrity] Querying Fabric Peer World States on channel "${FABRIC_CONFIG.CHANNEL_ID}" for Doc [${docId}]`);
 
-    const doc = dbStore.documents.find(d => d.id === docId);
+    const doc = await prisma.document.findUnique({
+      where: { id: docId },
+    });
+
     if (!doc) {
       throw new Error(`Document not found in Fabric World State: ${docId}`);
     }
 
     const currentFileHash = localFileHash || doc.fileHashSha256;
 
+    const allDocBlocks = await prisma.ledgerNodeRecord.findMany({
+      where: { documentId: docId },
+      orderBy: { blockIndex: 'asc' },
+    });
+
     const peerStates = FABRIC_MSPS.map((msp, idx) => {
-      const peerRecords = dbStore.ledgerRecords.filter(r => (r.mspId === msp.mspId || r.nodeId === idx + 1) && r.documentId === docId);
+      const peerRecords = allDocBlocks.filter(r => (r.mspId === msp.mspId || r.nodeId === idx + 1));
       const latestBlock = peerRecords.length > 0 ? peerRecords[peerRecords.length - 1] : null;
 
       const recordedHash = latestBlock ? (latestBlock.docHash || latestBlock.custodyHash) : null;
@@ -245,23 +253,49 @@ export class FabricChaincodeService {
 
     let verdict = 'TAMPERED_INCONSISTENT';
     let discrepancyDetails = '';
+    let docStatus = 'TAMPERED_FLAGGED';
+    let isFrozen = true;
 
     if (quorumAchieved) {
       verdict = 'VERIFIED';
+      docStatus = 'VERIFIED';
+      isFrozen = false;
       if (agreeingPeers.length === 3) {
         discrepancyDetails = `Full 3-of-3 Hyperledger Fabric Consortium Consensus verified. All peer nodes (${FABRIC_MSPS.map(m => m.mspId).join(', ')}) endorse file integrity.`;
       } else {
         const roguePeer = peerStates.find(p => !p.matchesFile);
         discrepancyDetails = `2-of-3 Byzantine Quorum achieved. Quorum endorsed by ${agreeingPeers.map(p => p.mspId).join(' & ')}. Note: Peer [${roguePeer?.mspId}] is desynchronized. File integrity certified by Fabric endorsement policy.`;
       }
-      doc.status = 'VERIFIED';
-      doc.isFrozen = false;
     } else {
       verdict = 'TAMPERED_INCONSISTENT';
-      doc.status = 'TAMPERED_FLAGGED';
-      doc.isFrozen = true;
+      docStatus = 'TAMPERED_FLAGGED';
+      isFrozen = true;
       discrepancyDetails = `CRITICAL FABRIC INTEGRITY FAILURE: Endorsement policy [${FABRIC_CONFIG.ENDORSEMENT_POLICY}] could not be satisfied. Only ${agreeingPeers.length} of ${FABRIC_MSPS.length} MSP peers agree with raw file hash. Evidence download has been locked.`;
     }
+
+    await prisma.document.update({
+      where: { id: docId },
+      data: {
+        status: docStatus,
+        isFrozen,
+      },
+    });
+
+    await prisma.tamperAudit.create({
+      data: {
+        documentId: docId,
+        testedAt: new Date(),
+        localFileHash: currentFileHash,
+        node1Hash: peerStates[0]?.recordedHash,
+        node2Hash: peerStates[1]?.recordedHash,
+        node3Hash: peerStates[2]?.recordedHash,
+        matchingNodesCount: agreeingPeers.length,
+        consensusReached: quorumAchieved,
+        verdict,
+        flagged: !quorumAchieved,
+        discrepancyDetails,
+      },
+    });
 
     return {
       documentId: docId,
@@ -276,14 +310,16 @@ export class FabricChaincodeService {
       totalMsps: FABRIC_MSPS.length,
       quorumRequired: FABRIC_CONFIG.ENDORSEMENT_THRESHOLD,
       discrepancyDetails,
-      isFrozen: doc.isFrozen,
+      isFrozen,
       peerStates,
     };
   }
 
   static async GetHistoryForKey(ctx, docId) {
-    this._ensureInit();
-    const blocks = dbStore.ledgerRecords.filter(r => r.documentId === docId);
+    const blocks = await prisma.ledgerNodeRecord.findMany({
+      where: { documentId: docId },
+      orderBy: { blockIndex: 'asc' },
+    });
 
     return blocks.map(b => ({
       txId: b.txId,
@@ -299,16 +335,26 @@ export class FabricChaincodeService {
   }
 
   static async QueryEvidenceByCouchDB(ctx, queryString) {
-    this._ensureInit();
     logger.info('FABRIC_CHAINCODE', `[QueryEvidenceByCouchDB] Executing CouchDB selector: "${queryString}"`);
-    const queryLower = (queryString || '').toLowerCase();
+    const term = (queryString || '').trim();
 
-    return dbStore.documents.filter(d => {
-      const matchTitle = d.title.toLowerCase().includes(queryLower);
-      const matchOcr = d.ocrText && d.ocrText.toLowerCase().includes(queryLower);
-      const matchEntities = d.extractedEntities && d.extractedEntities.toLowerCase().includes(queryLower);
-      const matchHash = d.fileHashSha256 && d.fileHashSha256.toLowerCase().includes(queryLower);
-      return matchTitle || matchOcr || matchEntities || matchHash;
+    return await prisma.document.findMany({
+      where: {
+        OR: [
+          { title: { contains: term, mode: 'insensitive' } },
+          { ocrText: { contains: term, mode: 'insensitive' } },
+          { extractedEntities: { contains: term, mode: 'insensitive' } },
+          { fileHashSha256: { contains: term, mode: 'insensitive' } },
+        ],
+      },
+      include: {
+        case: true,
+        uploadedBy: {
+          select: { id: true, name: true, role: true, badgeNumber: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
     });
   }
 }
+

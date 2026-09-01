@@ -1,24 +1,23 @@
 import { FABRIC_CONFIG, FABRIC_MSPS } from '../config/fabric.config.js';
 import { FabricGatewayService } from './fabricGatewayService.js';
 import { FabricChaincodeService } from './fabricChaincodeService.js';
-import { DOCUMENT_STATUS } from '../config/constants.js';
-import { dbStore } from '../prisma/client.js';
-import { initialSeedData } from '../prisma/seed.js';
+import { prisma } from '../prisma/client.js';
 import { logger } from '../utils/logger.js';
 
 export class LedgerCoordinatorService {
-  static _ensureInit() {
-    if (!dbStore.initialized) {
-      dbStore.initSeed(initialSeedData);
-    }
-  }
-
   static async writeToAllNodes(documentId, docHash, custodyHash = null, user = null) {
-    this._ensureInit();
     logger.info('FABRIC_LEDGER', `Executing Hyperledger Fabric transaction for Doc [${documentId}] on channel "${FABRIC_CONFIG.CHANNEL_ID}"`);
 
-    const doc = dbStore.documents.find(d => d.id === documentId);
-    const actor = user || (doc ? dbStore.users.find(u => u.id === doc.uploadedById) : null) || { id: 'usr-1', name: 'Inspector Vikram Rathore', role: 'INVESTIGATING_OFFICER', badgeNumber: 'IO-9842' };
+    const doc = await prisma.document.findUnique({
+      where: { id: documentId },
+      include: {
+        uploadedBy: {
+          select: { id: true, name: true, role: true, badgeNumber: true, station: true, email: true },
+        },
+      },
+    });
+
+    const actor = user || (doc ? doc.uploadedBy : null) || { id: 'usr-io-01', name: 'Inspector Amit Sharma', role: 'INVESTIGATING_OFFICER', badgeNumber: 'IO-9842' };
 
     let fabricResult;
     if (custodyHash) {
@@ -27,7 +26,7 @@ export class LedgerCoordinatorService {
         fromActor: actor,
         toActor: actor,
         transferReason: 'Custody record update on Hyperledger Fabric',
-        transferLocation: 'State Police Station / Evidence Locker',
+        transferLocation: actor.station || 'State Police Station / Evidence Locker',
         custodyHash,
       }, actor);
     } else {
@@ -63,9 +62,13 @@ export class LedgerCoordinatorService {
   }
 
   static async queryAllNodes(documentId) {
-    this._ensureInit();
+    const allDocBlocks = await prisma.ledgerNodeRecord.findMany({
+      where: { documentId },
+      orderBy: { blockIndex: 'asc' },
+    });
+
     return FABRIC_MSPS.map((msp, idx) => {
-      const records = dbStore.ledgerRecords.filter(r => (r.mspId === msp.mspId || r.nodeId === idx + 1) && r.documentId === documentId);
+      const records = allDocBlocks.filter(r => (r.mspId === msp.mspId || r.nodeId === idx + 1));
       const latestBlock = records.length > 0 ? records[records.length - 1] : null;
 
       return {
@@ -85,7 +88,6 @@ export class LedgerCoordinatorService {
   }
 
   static async verifyConsensus(documentId, localFileHash = null) {
-    this._ensureInit();
     return await FabricGatewayService.evaluateTransaction('VerifyEvidenceIntegrity', {
       docId: documentId,
       localFileHash,
@@ -106,15 +108,18 @@ export class LedgerCoordinatorService {
   }
 
   static async getFullLedgerOverview() {
-    this._ensureInit();
     const networkStatus = await FabricGatewayService.getNetworkStatus();
     const blocks = await FabricGatewayService.getFabricBlocks();
+
+    const allRecords = await prisma.ledgerNodeRecord.findMany({
+      orderBy: { blockIndex: 'asc' },
+    });
 
     return {
       networkStatus,
       recentBlocks: blocks,
       nodes: FABRIC_MSPS.map((msp, idx) => {
-        const peerBlocks = dbStore.ledgerRecords.filter(r => r.mspId === msp.mspId || r.nodeId === idx + 1).sort((a, b) => (a.blockIndex || 1) - (b.blockIndex || 1));
+        const peerBlocks = allRecords.filter(r => r.mspId === msp.mspId || r.nodeId === idx + 1);
         return {
           nodeId: idx + 1,
           mspId: msp.mspId,
@@ -130,3 +135,4 @@ export class LedgerCoordinatorService {
     };
   }
 }
+

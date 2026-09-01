@@ -1,3 +1,4 @@
+import 'dotenv/config';
 export const ROLES = {
   INVESTIGATING_OFFICER: 'INVESTIGATING_OFFICER',
   STATION_IN_CHARGE: 'STATION_IN_CHARGE',
@@ -47,9 +48,8 @@ export const LEDGER_NODES = [
     name: 'Peer 0 - Police Central MSP',
     shortName: 'Police MSP',
     authority: 'State Police Headquarters / Crime Records Bureau',
-    peerEndpoint: 'peer0.police.gov.in:7051',
-    port: 7051,
-    status: 'ONLINE',
+    peerEndpoint: process.env.POLICE_MSP_PEER.toString(),
+    
   },
   {
     id: 2,
@@ -57,9 +57,8 @@ export const LEDGER_NODES = [
     name: 'Peer 0 - Forensic & State CFSL MSP',
     shortName: 'State Forensic Lab',
     authority: 'Central Forensic Science Laboratory (CFSL)',
-    peerEndpoint: 'peer0.forensics.gov.in:8051',
-    port: 8051,
-    status: 'ONLINE',
+    peerEndpoint: process.env.FORENSICS_MSP_PEER.toString(),
+    
   },
   {
     id: 3,
@@ -67,8 +66,7 @@ export const LEDGER_NODES = [
     name: 'Peer 0 - Judicial High Court MSP',
     shortName: 'Judiciary MSP',
     authority: 'High Court Electronic Vault / Judicial Registry',
-    peerEndpoint: 'peer0.judiciary.gov.in:9051',
-    port: 9051,
-    status: 'ONLINE',
+    peerEndpoint: process.env.JUDICIARY_MSP_PEER.toString(),
+    
   },
 ];

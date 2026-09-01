@@ -1,66 +1,88 @@
 import bcrypt from 'bcryptjs';
-import crypto from 'crypto';
-import { dbStore } from '../prisma/client.js';
-import { initialSeedData } from '../prisma/seed.js';
+import { prisma } from '../prisma/client.js';
 import { logger } from '../utils/logger.js';
 
-export class UserService {
-  static _ensureInit() {
-    if (!dbStore.initialized) {
-      dbStore.initSeed(initialSeedData);
-    }
-  }
+const SAFE_USER_SELECT = {
+  id: true,
+  badgeNumber: true,
+  name: true,
+  email: true,
+  role: true,
+  department: true,
+  station: true,
+  designation: true,
+  createdAt: true,
+  updatedAt: true,
+};
 
+const VALID_ROLES = [
+  'INVESTIGATING_OFFICER',
+  'STATION_IN_CHARGE',
+  'FORENSIC_EXAMINER',
+  'PROSECUTOR',
+  'COURT_CLERK_JUDGE',
+  'ADMIN',
+];
+
+export class UserService {
   static async getAllUsers(filters = {}) {
-    this._ensureInit();
-    let users = [...dbStore.users];
+    const where = {};
 
     if (filters.role) {
-      users = users.filter(u => u.role === filters.role);
+      where.role = filters.role;
     }
 
     if (filters.department) {
-      users = users.filter(u => u.department.toLowerCase().includes(filters.department.toLowerCase()));
+      where.department = {
+        contains: filters.department,
+        mode: 'insensitive',
+      };
     }
 
     if (filters.search) {
-      const q = filters.search.toLowerCase();
-      users = users.filter(u => 
-        u.name.toLowerCase().includes(q) ||
-        u.email.toLowerCase().includes(q) ||
-        u.badgeNumber.toLowerCase().includes(q) ||
-        u.station.toLowerCase().includes(q)
-      );
+      const q = filters.search.trim();
+      where.OR = [
+        { name: { contains: q, mode: 'insensitive' } },
+        { email: { contains: q, mode: 'insensitive' } },
+        { badgeNumber: { contains: q, mode: 'insensitive' } },
+        { station: { contains: q, mode: 'insensitive' } },
+      ];
     }
 
-    return users.map(({ passwordHash, ...safeUser }) => safeUser);
+    return await prisma.user.findMany({
+      where,
+      select: SAFE_USER_SELECT,
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   static async getUserById(id) {
-    this._ensureInit();
-    const user = dbStore.users.find(u => u.id === id);
+    const user = await prisma.user.findUnique({
+      where: { id },
+      select: SAFE_USER_SELECT,
+    });
+
     if (!user) {
       throw new Error(`User with ID ${id} was not found.`);
     }
-    const { passwordHash, ...safeUser } = user;
-    return safeUser;
+
+    return user;
   }
 
   static async createUser(userData) {
-    this._ensureInit();
-
     const {
       name,
       email,
+      password,
       badgeNumber,
-      role = 'INVESTIGATING_OFFICER',
-      department = 'CID - Cyber Crime Division',
-      station = 'Delhi Central Police Station',
-      designation = 'Sub-Inspector',
-      password = 'Pass@1234',
+      role ,
+      department,
+      station ,
+      designation ,
+      
     } = userData;
 
-    if (!name || !email || !badgeNumber) {
+    if (!name || !email || !password ||!badgeNumber || !role || !department || !station || !designation) {
       throw new Error('Missing required user fields: name, email, and badgeNumber are mandatory.');
     }
 
@@ -69,122 +91,128 @@ export class UserService {
       throw new Error('Invalid email address format.');
     }
 
-    const existingEmail = dbStore.users.find(u => u.email.toLowerCase() === email.toLowerCase());
+    const normalizedRole = role === 'STATION_HOUSE_OFFICER' ? 'STATION_IN_CHARGE' : (role === 'PUBLIC_PROSECUTOR' ? 'PROSECUTOR' : (role === 'JUDICIAL_OFFICER' ? 'COURT_CLERK_JUDGE' : role));
+
+    if (!VALID_ROLES.includes(normalizedRole)) {
+      throw new Error(`Invalid role "${role}". Allowed roles: ${VALID_ROLES.join(', ')}`);
+    }
+
+    const existingEmail = await prisma.user.findFirst({
+      where: { email: { equals: email.trim(), mode: 'insensitive' } },
+    });
     if (existingEmail) {
       throw new Error(`A user with email "${email}" already exists.`);
     }
 
-    const existingBadge = dbStore.users.find(u => u.badgeNumber.toLowerCase() === badgeNumber.toLowerCase());
+    const existingBadge = await prisma.user.findFirst({
+      where: { badgeNumber: { equals: badgeNumber.trim(), mode: 'insensitive' } },
+    });
     if (existingBadge) {
       throw new Error(`A user with badge number "${badgeNumber}" already exists.`);
     }
 
-    const validRoles = [
-      'ADMIN',
-      'INVESTIGATING_OFFICER',
-      'STATION_HOUSE_OFFICER',
-      'FORENSIC_EXAMINER',
-      'PUBLIC_PROSECUTOR',
-      'JUDICIAL_OFFICER'
-    ];
-
-    if (!validRoles.includes(role)) {
-      throw new Error(`Invalid role "${role}". Allowed roles: ${validRoles.join(', ')}`);
-    }
-
     const passwordHash = bcrypt.hashSync(password, 10);
-    const newUser = {
-      id: crypto.randomUUID(),
-      name,
-      email: email.toLowerCase(),
-      badgeNumber: badgeNumber.toUpperCase(),
-      role,
-      department,
-      station,
-      designation,
-      passwordHash,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      active: true,
-    };
 
-    dbStore.users.push(newUser);
+    const newUser = await prisma.user.create({
+      data: {
+        name,
+        email: email.toLowerCase().trim(),
+        passwordHash,
+        badgeNumber: badgeNumber.toUpperCase().trim(),
+        role: normalizedRole,
+        department,
+        station,
+        designation,
+        
+      },
+      select: SAFE_USER_SELECT,
+    });
+
     logger.info('USER_SERVICE', `New user created successfully: ${newUser.name} [${newUser.role}] (${newUser.badgeNumber})`);
-
-    const { passwordHash: _, ...safeUser } = newUser;
-    return safeUser;
+    return newUser;
   }
 
   static async updateUser(id, updateData) {
-    this._ensureInit();
+    const existingUser = await prisma.user.findUnique({
+      where: { id },
+    });
 
-    const userIndex = dbStore.users.findIndex(u => u.id === id);
-    if (userIndex === -1) {
+    if (!existingUser) {
       throw new Error(`User with ID "${id}" was not found.`);
     }
 
-    const existingUser = dbStore.users[userIndex];
+    const dataToUpdate = {};
 
     if (updateData.email && updateData.email.toLowerCase() !== existingUser.email.toLowerCase()) {
-      const emailTaken = dbStore.users.find(u => u.email.toLowerCase() === updateData.email.toLowerCase() && u.id !== id);
+      const emailTaken = await prisma.user.findFirst({
+        where: {
+          email: { equals: updateData.email.trim(), mode: 'insensitive' },
+          id: { not: id },
+        },
+      });
       if (emailTaken) {
         throw new Error(`Email "${updateData.email}" is already in use by another user.`);
       }
-      existingUser.email = updateData.email.toLowerCase();
+      dataToUpdate.email = updateData.email.toLowerCase().trim();
     }
 
     if (updateData.badgeNumber && updateData.badgeNumber.toUpperCase() !== existingUser.badgeNumber.toUpperCase()) {
-      const badgeTaken = dbStore.users.find(u => u.badgeNumber.toUpperCase() === updateData.badgeNumber.toUpperCase() && u.id !== id);
+      const badgeTaken = await prisma.user.findFirst({
+        where: {
+          badgeNumber: { equals: updateData.badgeNumber.trim(), mode: 'insensitive' },
+          id: { not: id },
+        },
+      });
       if (badgeTaken) {
         throw new Error(`Badge number "${updateData.badgeNumber}" is already in use by another user.`);
       }
-      existingUser.badgeNumber = updateData.badgeNumber.toUpperCase();
+      dataToUpdate.badgeNumber = updateData.badgeNumber.toUpperCase().trim();
     }
 
-    if (updateData.name) existingUser.name = updateData.name;
+    if (updateData.name) dataToUpdate.name = updateData.name.trim();
+
     if (updateData.role) {
-      const validRoles = [
-        'ADMIN',
-        'INVESTIGATING_OFFICER',
-        'STATION_HOUSE_OFFICER',
-        'FORENSIC_EXAMINER',
-        'PUBLIC_PROSECUTOR',
-        'JUDICIAL_OFFICER'
-      ];
-      if (!validRoles.includes(updateData.role)) {
-        throw new Error(`Invalid role "${updateData.role}". Allowed roles: ${validRoles.join(', ')}`);
+      const normalizedRole = updateData.role === 'STATION_HOUSE_OFFICER' ? 'STATION_IN_CHARGE' : (updateData.role === 'PUBLIC_PROSECUTOR' ? 'PROSECUTOR' : (updateData.role === 'JUDICIAL_OFFICER' ? 'COURT_CLERK_JUDGE' : updateData.role));
+      if (!VALID_ROLES.includes(normalizedRole)) {
+        throw new Error(`Invalid role "${updateData.role}". Allowed roles: ${VALID_ROLES.join(', ')}`);
       }
-      existingUser.role = updateData.role;
+      dataToUpdate.role = normalizedRole;
     }
-    if (updateData.department) existingUser.department = updateData.department;
-    if (updateData.station) existingUser.station = updateData.station;
-    if (updateData.designation) existingUser.designation = updateData.designation;
-    if (typeof updateData.active === 'boolean') existingUser.active = updateData.active;
+
+    if (updateData.department) dataToUpdate.department = updateData.department.trim();
+    if (updateData.station) dataToUpdate.station = updateData.station.trim();
+    if (updateData.designation) dataToUpdate.designation = updateData.designation.trim();
 
     if (updateData.password) {
-      existingUser.passwordHash = bcrypt.hashSync(updateData.password, 10);
+      dataToUpdate.passwordHash = bcrypt.hashSync(updateData.password, 10);
     }
 
-    existingUser.updatedAt = new Date().toISOString();
-    dbStore.users[userIndex] = existingUser;
+    const updatedUser = await prisma.user.update({
+      where: { id },
+      data: dataToUpdate,
+      select: SAFE_USER_SELECT,
+    });
 
-    logger.info('USER_SERVICE', `User updated successfully: ${existingUser.name} (${existingUser.id})`);
-
-    const { passwordHash, ...safeUser } = existingUser;
-    return safeUser;
+    logger.info('USER_SERVICE', `User updated successfully: ${updatedUser.name} (${updatedUser.id})`);
+    return updatedUser;
   }
 
   static async deleteUser(id) {
-    this._ensureInit();
-    const userIndex = dbStore.users.findIndex(u => u.id === id);
-    if (userIndex === -1) {
+    const existingUser = await prisma.user.findUnique({
+      where: { id },
+    });
+
+    if (!existingUser) {
       throw new Error(`User with ID "${id}" was not found.`);
     }
 
-    const [deletedUser] = dbStore.users.splice(userIndex, 1);
-    logger.info('USER_SERVICE', `User deleted: ${deletedUser.name} (${deletedUser.badgeNumber})`);
+    const deletedUser = await prisma.user.delete({
+      where: { id },
+      select: SAFE_USER_SELECT,
+    });
 
-    const { passwordHash, ...safeUser } = deletedUser;
-    return safeUser;
+    logger.info('USER_SERVICE', `User deleted: ${deletedUser.name} (${deletedUser.badgeNumber})`);
+    return deletedUser;
   }
 }
+

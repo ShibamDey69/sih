@@ -1,19 +1,22 @@
 
 
 datasource db {
-  provider = "sqlite"
-  url      = "file:./dev.db"
+  provider = "postgresql"
+  url      = env("POSTGRES_URL")
 }
 
 generator client {
-  provider = "prisma-client-js"
+  provider   = "prisma-client-js"
+  engineType = "binary"
 }
 
 enum Role {
   INVESTIGATING_OFFICER
   STATION_IN_CHARGE
+  FORENSIC_EXAMINER
   PROSECUTOR
   COURT_CLERK_JUDGE
+  ADMIN
 }
 
 enum DocumentStatus {
@@ -70,62 +73,67 @@ model CaseRecord {
 }
 
 model Document {
-  id              String         @id @default(uuid())
-  caseId          String
-  case            CaseRecord     @relation(fields: [caseId], references: [id], onDelete: Cascade)
-  title           String
-  originalName    String
-  mimeType        String
-  fileSizeBytes   Int
-  filePath        String
-  fileHashSha256  String         // 64-char SHA-256 hex string of raw file bytes
-  ocrText         String?
-  extractedEntities String?      // JSON stringified regex/NLP parsed entities: dates, names, legal sections, FIR
-  documentType    String         // FIR_COPY, SEIZURE_MEMO, WITNESS_STATEMENT, FORENSIC_REPORT, EVIDENCE_PHOTO, BALLISTICS
-  status          DocumentStatus @default(PENDING_VERIFICATION)
-  isFrozen        Boolean        @default(false) // Freeze download if tampered
-  uploadedById    String
-  uploadedBy      User           @relation("DocUploader", fields: [uploadedById], references: [id])
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
+  id                String         @id @default(uuid())
+  caseId            String
+  case              CaseRecord     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  title             String
+  originalName      String
+  mimeType          String
+  fileSizeBytes     Int
+  filePath          String
+  fileHashSha256    String         // 64-char SHA-256 hex string of raw file bytes
+  ocrText           String?
+  extractedEntities String?        // JSON stringified regex/NLP parsed entities: dates, names, legal sections, FIR
+  documentType      String         // FIR_COPY, SEIZURE_MEMO, WITNESS_STATEMENT, FORENSIC_REPORT, EVIDENCE_PHOTO, BALLISTICS
+  status            DocumentStatus @default(PENDING_VERIFICATION)
+  isFrozen          Boolean        @default(false) // Freeze download if tampered
+  uploadedById      String
+  uploadedBy        User           @relation("DocUploader", fields: [uploadedById], references: [id])
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
 
-  custodyLogs     CustodyLog[]
-  ledgerRecords   LedgerNodeRecord[]
-  tamperAudits    TamperAudit[]
+  custodyLogs       CustodyLog[]
+  ledgerRecords     LedgerNodeRecord[]
+  tamperAudits      TamperAudit[]
 }
 
 model CustodyLog {
-  id               String        @id @default(uuid())
-  documentId       String
-  document         Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  caseId           String
-  case             CaseRecord    @relation(fields: [caseId], references: [id], onDelete: Cascade)
-  fromActorId      String
-  fromActor        User          @relation("CustodyFrom", fields: [fromActorId], references: [id])
-  toActorId        String
-  toActor          User          @relation("CustodyTo", fields: [toActorId], references: [id])
-  transferReason   String
-  transferLocation String
-  timestamp        DateTime      @default(now())
-  custodyHash      String        // Cryptographic SHA-256 hash of custody event
-  status           CustodyStatus @default(RECEIVED_ACKNOWLEDGED)
+  id                  String        @id @default(uuid())
+  documentId          String
+  document            Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  caseId              String
+  case                CaseRecord    @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  fromActorId         String
+  fromActor           User          @relation("CustodyFrom", fields: [fromActorId], references: [id])
+  toActorId           String
+  toActor             User          @relation("CustodyTo", fields: [toActorId], references: [id])
+  transferReason      String
+  transferLocation    String
+  timestamp           DateTime      @default(now())
+  custodyHash         String        // Cryptographic SHA-256 hash of custody event
+  status              CustodyStatus @default(RECEIVED_ACKNOWLEDGED)
   acknowledgementNote String?
 }
 
 model LedgerNodeRecord {
-  id                String   @id @default(uuid())
-  nodeName          String   // "Node 1 - Police Central", "Node 2 - State Forensics", "Node 3 - Judiciary Archive"
-  nodeId            Int      // 1, 2, or 3
+  id                String    @id @default(uuid())
+  channelId         String?   @default("evidence-consortium-channel")
+  chaincodeId       String?   @default("evidence_custody_cc")
+  nodeName          String    // "Peer 0 - Police Central MSP", "Peer 0 - Forensic & State CFSL MSP", "Peer 0 - Judicial High Court MSP"
+  nodeId            Int       // 1, 2, or 3
+  mspId             String?   // "PoliceMSP", "ForensicsMSP", "JudiciaryMSP"
   documentId        String
-  document          Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  docHash           String   // Recorded SHA-256 hash
-  custodyHash       String?  // Chained custody hash
+  document          Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  docHash           String    // Recorded SHA-256 hash
+  custodyHash       String?   // Chained custody hash
   blockIndex        Int
   previousBlockHash String
   currentBlockHash  String
+  dataHash          String?
+  txId              String?
   signature         String
-  timestamp         DateTime @default(now())
-  isCorrupted       Boolean  @default(false) // Used to simulate tampering/rogue node
+  timestamp         DateTime  @default(now())
+  isCorrupted       Boolean   @default(false) // Used to simulate tampering/rogue node
 }
 
 model TamperAudit {

@@ -2,20 +2,11 @@ import { HashService } from './hashService.js';
 import { OcrEntityService } from './ocrEntityService.js';
 import { LedgerCoordinatorService } from './ledgerCoordinatorService.js';
 import { DOCUMENT_STATUS } from '../config/constants.js';
-import { dbStore } from '../prisma/client.js';
-import { initialSeedData } from '../prisma/seed.js';
+import { prisma } from '../prisma/client.js';
 import { logger } from '../utils/logger.js';
 
 export class DocumentService {
-  static _ensureInit() {
-    if (!dbStore.initialized) {
-      dbStore.initSeed(initialSeedData);
-    }
-  }
-
   static async uploadAndProcessDocument(fileData, user) {
-    this._ensureInit();
-
     const {
       caseId,
       title,
@@ -28,7 +19,10 @@ export class DocumentService {
 
     logger.info('DOCUMENT_SERVICE', `Starting upload pipeline for: ${originalName} (Case: ${caseId})`);
 
-    const caseRecord = dbStore.cases.find(c => c.id === caseId);
+    const caseRecord = await prisma.caseRecord.findUnique({
+      where: { id: caseId },
+    });
+
     if (!caseRecord) {
       throw new Error(`Target Case record not found for ID: ${caseId}`);
     }
@@ -36,8 +30,8 @@ export class DocumentService {
     const bufferToHash = fileBuffer || Buffer.from(rawTextContent || title || Date.now().toString());
     const fileHashSha256 = HashService.hashRawBytes(bufferToHash);
 
-    const docId = `doc-${Date.now().toString().slice(-6)}`;
     const now = new Date();
+    const docId = `doc-${Date.now().toString().slice(-6)}`;
 
     const ocrResult = await OcrEntityService.processDocumentOcr(
       fileBuffer || rawTextContent || '',
@@ -46,47 +40,57 @@ export class DocumentService {
       { docId }
     );
 
-    const newDocument = {
-      id: docId,
-      caseId,
-      title: title || originalName || 'Evidence Document',
-      originalName: originalName || 'evidence.pdf',
-      mimeType: mimeType || 'application/pdf',
-      fileSizeBytes: bufferToHash.length,
-      filePath: `/evidence/${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, '0')}/${docId}_${originalName}`,
-      fileHashSha256,
-      ocrText: ocrResult.ocrText,
-      ocrConfidence: ocrResult.confidence,
-      pageCount: ocrResult.pageCount || 1,
-      pages: ocrResult.pages || [],
-      ocrEngine: ocrResult.ocrEngine,
-      extractedEntities: JSON.stringify(ocrResult.entities),
-      documentType: documentType || 'EVIDENCE_PHOTO',
-      status: DOCUMENT_STATUS.PENDING_VERIFICATION,
-      isFrozen: false,
-      uploadedById: user.id,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    dbStore.documents.unshift(newDocument);
+    const createdDoc = await prisma.document.create({
+      data: {
+        id: docId,
+        caseId,
+        title: title || originalName || 'Evidence Document',
+        originalName: originalName || 'evidence.pdf',
+        mimeType: mimeType || 'application/pdf',
+        fileSizeBytes: bufferToHash.length,
+        filePath: `/evidence/${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, '0')}/${docId}_${originalName}`,
+        fileHashSha256,
+        ocrText: ocrResult.ocrText,
+        extractedEntities: JSON.stringify(ocrResult.entities),
+        documentType: documentType || 'EVIDENCE_PHOTO',
+        status: DOCUMENT_STATUS.PENDING_VERIFICATION,
+        isFrozen: false,
+        uploadedById: user.id,
+      },
+      include: {
+        case: true,
+        uploadedBy: {
+          select: { id: true, name: true, role: true, badgeNumber: true },
+        },
+      },
+    });
 
     const ledgerResult = await LedgerCoordinatorService.writeToAllNodes(
-      docId,
+      createdDoc.id,
       fileHashSha256,
       null,
       user
     );
 
+    let finalDoc = createdDoc;
     if (ledgerResult.success) {
-      newDocument.status = DOCUMENT_STATUS.VERIFIED;
+      finalDoc = await prisma.document.update({
+        where: { id: createdDoc.id },
+        data: { status: DOCUMENT_STATUS.VERIFIED },
+        include: {
+          case: true,
+          uploadedBy: {
+            select: { id: true, name: true, role: true, badgeNumber: true },
+          },
+        },
+      });
     }
 
     logger.info('DOCUMENT_SERVICE', `Document [${docId}] successfully created, OCR parsed (${ocrResult.pageCount || 1} pages, ${ocrResult.confidence}% confidence), and written to 3-Node Ledger.`);
 
     return {
       document: {
-        ...newDocument,
+        ...finalDoc,
         extractedEntitiesParsed: ocrResult.entities,
         ocrBreakdown: {
           pageCount: ocrResult.pageCount,
@@ -104,16 +108,36 @@ export class DocumentService {
   }
 
   static async getDocumentById(documentId) {
-    this._ensureInit();
-    const doc = dbStore.documents.find(d => d.id === documentId);
+    const doc = await prisma.document.findUnique({
+      where: { id: documentId },
+      include: {
+        case: true,
+        uploadedBy: {
+          select: { id: true, name: true, role: true, badgeNumber: true },
+        },
+        custodyLogs: {
+          include: {
+            fromActor: {
+              select: { id: true, name: true, role: true, badgeNumber: true, station: true },
+            },
+            toActor: {
+              select: { id: true, name: true, role: true, badgeNumber: true, station: true },
+            },
+          },
+          orderBy: { timestamp: 'asc' },
+        },
+        ledgerRecords: {
+          orderBy: { blockIndex: 'asc' },
+        },
+        tamperAudits: {
+          orderBy: { testedAt: 'desc' },
+        },
+      },
+    });
+
     if (!doc) {
       throw new Error(`Document not found with ID: ${documentId}`);
     }
-
-    const caseRecord = dbStore.cases.find(c => c.id === doc.caseId);
-    const uploader = dbStore.users.find(u => u.id === doc.uploadedById);
-    const custodyLogs = dbStore.custodyLogs.filter(cl => cl.documentId === documentId);
-    const ledgerBlocks = dbStore.ledgerRecords.filter(lr => lr.documentId === documentId);
 
     let parsedEntities = null;
     try {
@@ -124,27 +148,36 @@ export class DocumentService {
 
     return {
       ...doc,
-      caseRecord,
-      uploader: uploader ? { id: uploader.id, name: uploader.name, role: uploader.role, badge: uploader.badgeNumber } : null,
+      caseRecord: doc.case,
+      uploader: doc.uploadedBy,
       extractedEntitiesParsed: parsedEntities,
-      custodyLogs,
-      ledgerBlocks,
+      ledgerBlocks: doc.ledgerRecords,
     };
   }
 
   static async getAllDocuments(filters = {}) {
-    this._ensureInit();
-    let docs = [...dbStore.documents];
+    const where = {};
 
     if (filters.caseId) {
-      docs = docs.filter(d => d.caseId === filters.caseId);
+      where.caseId = filters.caseId;
     }
     if (filters.status) {
-      docs = docs.filter(d => d.status === filters.status);
+      where.status = filters.status;
     }
     if (filters.documentType) {
-      docs = docs.filter(d => d.documentType === filters.documentType);
+      where.documentType = filters.documentType;
     }
+
+    const docs = await prisma.document.findMany({
+      where,
+      include: {
+        case: true,
+        uploadedBy: {
+          select: { id: true, name: true, role: true, badgeNumber: true },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
 
     return docs.map(d => {
       let parsed = null;
@@ -161,19 +194,22 @@ export class DocumentService {
   }
 
   static async setDocumentFrozenState(documentId, isFrozen, reason = '') {
-    this._ensureInit();
-    const doc = dbStore.documents.find(d => d.id === documentId);
+    const doc = await prisma.document.findUnique({
+      where: { id: documentId },
+    });
+
     if (!doc) throw new Error(`Document not found: ${documentId}`);
 
-    doc.isFrozen = isFrozen;
-    if (isFrozen) {
-      doc.status = DOCUMENT_STATUS.FROZEN;
-    } else {
-      doc.status = DOCUMENT_STATUS.VERIFIED;
-    }
-    doc.updatedAt = new Date();
+    const updated = await prisma.document.update({
+      where: { id: documentId },
+      data: {
+        isFrozen: !!isFrozen,
+        status: isFrozen ? DOCUMENT_STATUS.FROZEN : DOCUMENT_STATUS.VERIFIED,
+      },
+    });
 
     logger.warn('DOCUMENT_SERVICE', `Document ${documentId} frozen state set to ${isFrozen}. Reason: ${reason}`);
-    return doc;
+    return updated;
   }
 }
+

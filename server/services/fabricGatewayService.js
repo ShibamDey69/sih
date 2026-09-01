@@ -1,16 +1,9 @@
 import { FABRIC_CONFIG, FABRIC_MSPS, FABRIC_RAFT_CLUSTER } from '../config/fabric.config.js';
 import { FabricChaincodeService } from './fabricChaincodeService.js';
-import { dbStore } from '../prisma/client.js';
-import { initialSeedData } from '../prisma/seed.js';
+import { prisma } from '../prisma/client.js';
 import { logger } from '../utils/logger.js';
 
 export class FabricGatewayService {
-  static _ensureInit() {
-    if (!dbStore.initialized) {
-      dbStore.initSeed(initialSeedData);
-    }
-  }
-
   static getGatewayContext(user) {
     const identity = FabricChaincodeService.generateFabricIdentity(user);
     return {
@@ -23,7 +16,6 @@ export class FabricGatewayService {
   }
 
   static async submitTransaction(fnName, args, user) {
-    this._ensureInit();
     const ctx = this.getGatewayContext(user);
     logger.info('FABRIC_GATEWAY', `[submitTransaction] Invoking "${fnName}" on channel "${ctx.channelId}" as [${ctx.identity.enrollmentId}] (${ctx.identity.mspId})`);
 
@@ -38,7 +30,6 @@ export class FabricGatewayService {
   }
 
   static async evaluateTransaction(fnName, args, user = null) {
-    this._ensureInit();
     const ctx = user ? this.getGatewayContext(user) : { channelId: FABRIC_CONFIG.CHANNEL_ID, chaincodeId: FABRIC_CONFIG.CHAINCODE_NAME };
     logger.info('FABRIC_GATEWAY', `[evaluateTransaction] Evaluating "${fnName}" on channel "${ctx.channelId}"`);
 
@@ -55,8 +46,10 @@ export class FabricGatewayService {
   }
 
   static async getNetworkStatus() {
-    this._ensureInit();
-    const blocks = dbStore.ledgerRecords;
+    const blocks = await prisma.ledgerNodeRecord.findMany({
+      orderBy: { blockIndex: 'asc' },
+    });
+
     const blockHeight = blocks.length > 0 ? Math.max(...blocks.map(b => b.blockIndex || 1)) : 1;
 
     return {
@@ -85,15 +78,18 @@ export class FabricGatewayService {
   }
 
   static async getFabricBlocks() {
-    this._ensureInit();
+    const records = await prisma.ledgerNodeRecord.findMany({
+      orderBy: { blockIndex: 'desc' },
+    });
+
     const blockMap = new Map();
 
-    dbStore.ledgerRecords.forEach(record => {
+    records.forEach(record => {
       const idx = record.blockIndex || 1;
       if (!blockMap.has(idx)) {
         blockMap.set(idx, {
           blockNumber: idx,
-          channelId: FABRIC_CONFIG.CHANNEL_ID,
+          channelId: record.channelId || FABRIC_CONFIG.CHANNEL_ID,
           currentBlockHash: record.currentBlockHash,
           previousBlockHash: record.previousBlockHash,
           dataHash: record.dataHash || record.docHash,
@@ -112,23 +108,43 @@ export class FabricGatewayService {
         recordedHash: record.docHash,
         isCorrupted: record.isCorrupted,
       });
+      if (record.isCorrupted) {
+        blk.isCorrupted = true;
+      }
     });
 
     return Array.from(blockMap.values()).sort((a, b) => b.blockNumber - a.blockNumber);
   }
 
   static async simulatePeerTamper(documentId, targetMspId = 'ForensicsMSP') {
-    this._ensureInit();
-    const records = dbStore.ledgerRecords.filter(r => r.documentId === documentId && (r.mspId === targetMspId || (targetMspId === '2' && r.nodeId === 2) || (targetMspId === '1' && r.nodeId === 1) || (targetMspId === '3' && r.nodeId === 3)));
+    const records = await prisma.ledgerNodeRecord.findMany({
+      where: {
+        documentId,
+        OR: [
+          { mspId: targetMspId },
+          { nodeId: targetMspId === 'PoliceMSP' ? 1 : targetMspId === 'JudiciaryMSP' ? 3 : 2 },
+        ],
+      },
+    });
     
     if (records.length === 0) {
       throw new Error(`No ledger block found for MSP [${targetMspId}] on doc [${documentId}]`);
     }
 
     const fakeHash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
-    records.forEach(r => {
-      r.docHash = fakeHash;
-      r.isCorrupted = true;
+
+    await prisma.ledgerNodeRecord.updateMany({
+      where: {
+        documentId,
+        OR: [
+          { mspId: targetMspId },
+          { nodeId: targetMspId === 'PoliceMSP' ? 1 : targetMspId === 'JudiciaryMSP' ? 3 : 2 },
+        ],
+      },
+      data: {
+        docHash: fakeHash,
+        isCorrupted: true,
+      },
     });
 
     logger.warn('FABRIC_TAMPER_LAB', `Simulated Byzantine state corruption on MSP [${targetMspId}] for Doc [${documentId}]`);
@@ -136,40 +152,61 @@ export class FabricGatewayService {
   }
 
   static async simulateFileTamper(documentId) {
-    this._ensureInit();
-    const doc = dbStore.documents.find(d => d.id === documentId);
+    const doc = await prisma.document.findUnique({
+      where: { id: documentId },
+    });
     if (!doc) throw new Error(`Document ${documentId} not found`);
 
     const alteredHash = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
-    doc.fileHashSha256 = alteredHash;
-    doc.status = 'TAMPERED_FLAGGED';
-    doc.isFrozen = true;
+
+    await prisma.document.update({
+      where: { id: documentId },
+      data: {
+        fileHashSha256: alteredHash,
+        status: 'TAMPERED_FLAGGED',
+        isFrozen: true,
+      },
+    });
 
     logger.warn('FABRIC_TAMPER_LAB', `Simulated raw byte manipulation for Doc [${documentId}]`);
     return { success: true, alteredHash };
   }
 
   static async reconcilePeerState(documentId) {
-    this._ensureInit();
-    const doc = dbStore.documents.find(d => d.id === documentId);
+    const doc = await prisma.document.findUnique({
+      where: { id: documentId },
+    });
     if (!doc) throw new Error(`Document ${documentId} not found`);
 
-    const validBlocks = dbStore.ledgerRecords.filter(r => r.documentId === documentId && !r.isCorrupted);
-    const validHash = validBlocks.length > 0 ? (validBlocks[0].custodyHash || validBlocks[0].docHash) : doc.fileHashSha256;
-
-    dbStore.ledgerRecords.forEach(r => {
-      if (r.documentId === documentId) {
-        r.docHash = validHash;
-        r.custodyHash = validHash;
-        r.isCorrupted = false;
-      }
+    const validBlock = await prisma.ledgerNodeRecord.findFirst({
+      where: {
+        documentId,
+        isCorrupted: false,
+      },
     });
 
-    doc.fileHashSha256 = validHash;
-    doc.status = 'VERIFIED';
-    doc.isFrozen = false;
+    const validHash = validBlock ? (validBlock.custodyHash || validBlock.docHash) : doc.fileHashSha256;
+
+    await prisma.ledgerNodeRecord.updateMany({
+      where: { documentId },
+      data: {
+        docHash: validHash,
+        custodyHash: validHash,
+        isCorrupted: false,
+      },
+    });
+
+    await prisma.document.update({
+      where: { id: documentId },
+      data: {
+        fileHashSha256: validHash,
+        status: 'VERIFIED',
+        isFrozen: false,
+      },
+    });
 
     logger.info('FABRIC_GATEWAY', `Peer state reconciled and healed across all MSPs for Doc [${documentId}]`);
     return { success: true, restoredHash: validHash };
   }
 }
+

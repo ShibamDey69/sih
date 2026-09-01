@@ -5,10 +5,6 @@ import apiRouter from './routes/index.js';
 import { errorHandler } from './middlewares/errorMiddleware.js';
 import { custodyAuditMiddleware } from './middlewares/morganMiddleware.js';
 import { logger } from './utils/logger.js';
-import { dbStore } from './prisma/client.js';
-import { initialSeedData } from './prisma/seed.js';
-
-dbStore.initSeed(initialSeedData);
 
 const app = express();
 
